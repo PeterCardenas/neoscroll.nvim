@@ -27,6 +27,26 @@ local function create_scroll_func(scroll_args, winid)
   end
 end
 
+---Check if a buffer line is hidden by conceal_lines extmarks
+---@param bufnr integer
+---@param lnum integer 1-based line number
+---@return boolean
+local function is_line_concealed(bufnr, lnum)
+  local marks = vim.api.nvim_buf_get_extmarks(
+    bufnr,
+    -1,
+    { lnum - 1, 0 },
+    { lnum - 1, 0 },
+    { details = true }
+  )
+  for _, mark in ipairs(marks) do
+    if mark[4] and mark[4].conceal_lines ~= nil then
+      return true
+    end
+  end
+  return false
+end
+
 local scroll = {
   target_line = 0,
   relative_line = 0,
@@ -177,6 +197,26 @@ function scroll:scroll_one_line(lines_to_scroll, scroll_window, scroll_cursor)
   end
   local scrolled_lines = lines_to_scroll > 0 and 1 or -1
 
+  -- Skip concealed lines (conceal_lines extmarks with zero display height).
+  -- The cursor can land on these via gj/gk or scrolloff enforcement.
+  local bufnr = vim.api.nvim_win_get_buf(self.opts.winid)
+  local function skip_concealed_cursor_lines()
+    local cur = vim.api.nvim_win_get_cursor(self.opts.winid)[1]
+    while is_line_concealed(bufnr, cur) do
+      local skip_func = create_scroll_func(cursor_scroll_cmd, self.opts.winid)
+      if not pcall(skip_func) then
+        break
+      end
+      local new_cur = vim.api.nvim_win_get_cursor(self.opts.winid)[1]
+      if new_cur == cur then
+        break
+      end
+      cur = new_cur
+    end
+  end
+
+  skip_concealed_cursor_lines()
+
   if scroll_cursor and scroll_window then
     -- Correct for wrapped lines
     local winline = vim.api.nvim_win_call(self.opts.winid, vim.fn.winline)
@@ -191,13 +231,14 @@ function scroll:scroll_one_line(lines_to_scroll, scroll_window, scroll_cursor)
       if not success then
         return false
       end
+      skip_concealed_cursor_lines()
     end
   end
 
   -- If the cursor is still on the same line we can use the change in window line
   -- to calculate the lines we have scrolled more accurately (not affected by wrapped lines)
   local cursor_line = vim.api.nvim_win_get_cursor(self.opts.winid)[1]
-  if cursor_line == initial_cursor_line  then
+  if cursor_line == initial_cursor_line then
     local final_winline = vim.api.nvim_win_call(self.opts.winid, vim.fn.winline)
     scrolled_lines = initial_winline - final_winline
   end
