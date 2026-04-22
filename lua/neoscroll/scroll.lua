@@ -53,6 +53,7 @@ local scroll = {
   initial_cursor_win_line = nil,
   scrolling = false,
   continuous_scroll = false,
+  screenline_mode = false,
   timer = vim.loop.new_timer(),
 }
 
@@ -143,6 +144,7 @@ function scroll:tear_down()
   self.target_line = 0
   self.scrolling = false
   self.continuous_scroll = false
+  self.screenline_mode = false
 end
 
 ---Compute current time step of animation
@@ -185,15 +187,73 @@ function scroll:scroll_one_line(lines_to_scroll, scroll_window, scroll_cursor)
   end
   local initial_winline = vim.api.nvim_win_call(self.opts.winid, vim.fn.winline)
   local initial_cursor_line = vim.api.nvim_win_get_cursor(self.opts.winid)[1]
-  local cursor_scroll_cmd = lines_to_scroll > 0 and "gj" or "gk"
-  local cursor_scroll_args = scroll_cursor and cursor_scroll_cmd or ""
-  local window_scroll_cmd = lines_to_scroll > 0 and ctrl_e or ctrl_y
-  local window_scroll_args = scroll_window and window_scroll_cmd or ""
-  local scroll_args = window_scroll_args .. cursor_scroll_args
-  local one_line_scroll = create_scroll_func(scroll_args, self.opts.winid)
-  local success, _ = pcall(one_line_scroll) ---@diagnostic disable-line
-  if not success then
-    return false
+  local direction = lines_to_scroll > 0 and 1 or -1
+  local window_scroll_cmd = direction > 0 and ctrl_e or ctrl_y
+  local screenline_cursor_scroll_cmd = direction > 0 and "gj" or "gk"
+
+  local function run_scroll_cmd(scroll_cmd)
+    if scroll_cmd == "" then
+      return true
+    end
+    local scroll_func = create_scroll_func(scroll_cmd, self.opts.winid)
+    return pcall(scroll_func) ---@diagnostic disable-line
+  end
+
+  if self.screenline_mode then
+    local scroll_args
+    if scroll_window and scroll_cursor then
+      scroll_args = window_scroll_cmd .. screenline_cursor_scroll_cmd
+    elseif scroll_window then
+      scroll_args = window_scroll_cmd
+    elseif scroll_cursor then
+      scroll_args = screenline_cursor_scroll_cmd
+    else
+      return false
+    end
+
+    local success = run_scroll_cmd(scroll_args)
+    if not success then
+      return false
+    end
+
+    self.relative_line = self.relative_line + direction
+    return true
+  end
+
+  local cursor_line_wraps = vim.api.nvim_win_call(self.opts.winid, function()
+    if not vim.wo.wrap then
+      return false
+    end
+    local wininfo = vim.fn.getwininfo(vim.api.nvim_get_current_win())[1]
+    local text_width = vim.api.nvim_win_get_width(0) - wininfo.textoff
+    return text_width > 0 and vim.fn.virtcol("$") - 1 > text_width
+  end)
+  local cursor_scroll_cmd
+  if cursor_line_wraps then
+    cursor_scroll_cmd = lines_to_scroll > 0 and "j" or "k"
+  else
+    cursor_scroll_cmd = lines_to_scroll > 0 and "gj" or "gk"
+  end
+
+  if cursor_line_wraps then
+    if scroll_window and not run_scroll_cmd(window_scroll_cmd) then
+      return false
+    end
+    local cursor_line_after_window_scroll = vim.api.nvim_win_get_cursor(self.opts.winid)[1]
+    local should_scroll_cursor = scroll_cursor and (
+      not scroll_window or cursor_line_after_window_scroll == initial_cursor_line
+    )
+    if should_scroll_cursor and not run_scroll_cmd(cursor_scroll_cmd) then
+      return false
+    end
+  else
+    local cursor_scroll_args = scroll_cursor and cursor_scroll_cmd or ""
+    local window_scroll_args = scroll_window and window_scroll_cmd or ""
+    local scroll_args = window_scroll_args .. cursor_scroll_args
+    local success = run_scroll_cmd(scroll_args)
+    if not success then
+      return false
+    end
   end
   local scrolled_lines = lines_to_scroll > 0 and 1 or -1
 
@@ -217,7 +277,7 @@ function scroll:scroll_one_line(lines_to_scroll, scroll_window, scroll_cursor)
 
   skip_concealed_cursor_lines()
 
-  if scroll_cursor and scroll_window then
+  if scroll_cursor and scroll_window and not cursor_line_wraps then
     -- Correct for wrapped lines
     local winline = vim.api.nvim_win_call(self.opts.winid, vim.fn.winline)
     local lines_behind = winline - self.initial_cursor_win_line

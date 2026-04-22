@@ -10,7 +10,7 @@ describe("When EOF is reached", function()
   before_each(function()
     vim.api.nvim_command("normal ggGM")
     time = 100
-    time_tol = 5
+    time_tol = require("tests.time_tol")
     lines = 7
     cursor_start = vim.fn.line(".")
     window_start = vim.fn.line("w0")

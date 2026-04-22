@@ -51,6 +51,55 @@ local function get_lines_from_win_fraction(fraction, winid)
   return lines
 end
 
+local function wrapped_smoothscroll_enabled(winid)
+  return vim.api.nvim_win_call(winid, function()
+    return vim.wo.wrap and vim.wo.smoothscroll
+  end)
+end
+
+local function get_screenline_steps(winid, lines)
+  local ctrl_e = vim.api.nvim_replace_termcodes("<C-e>", false, false, true)
+  local ctrl_y = vim.api.nvim_replace_termcodes("<C-y>", false, false, true)
+  local direction = lines > 0 and 1 or -1
+  local cursor_scroll_cmd = direction > 0 and "gj" or "gk"
+  local scroll_cmd = direction > 0 and ctrl_e .. cursor_scroll_cmd or ctrl_y .. cursor_scroll_cmd
+  local target_lines = math.abs(lines)
+
+  return vim.api.nvim_win_call(winid, function()
+    local initial_view = vim.fn.winsaveview()
+    local initial_topline = vim.fn.line("w0")
+    local initial_cursor_line = vim.fn.line(".")
+    local steps = 0
+
+    while
+      (vim.fn.line("w0") - initial_topline) * direction < target_lines
+      or (vim.fn.line(".") - initial_cursor_line) * direction < target_lines
+    do
+      local before_view = vim.fn.winsaveview()
+      local before_topline = vim.fn.line("w0")
+      local before_cursor_line = vim.fn.line(".")
+      local before_col = vim.fn.col(".")
+      vim.cmd.normal({ bang = true, args = { scroll_cmd } })
+      local after_view = vim.fn.winsaveview()
+      local after_topline = vim.fn.line("w0")
+      local after_cursor_line = vim.fn.line(".")
+      local after_col = vim.fn.col(".")
+      if
+        after_topline == before_topline
+        and after_view.skipcol == before_view.skipcol
+        and after_cursor_line == before_cursor_line
+        and after_col == before_col
+      then
+        break
+      end
+      steps = steps + 1
+    end
+
+    vim.fn.winrestview(initial_view)
+    return steps
+  end)
+end
+
 local function make_scroll_callback()
   return function()
     local lines_to_scroll = scroll:lines_to_scroll()
@@ -142,6 +191,15 @@ function neoscroll.new_scroll(lines, opts)
   if is_float(lines) then
     lines = get_lines_from_win_fraction(lines, scroll.opts.winid)
   end
+
+  if scroll.scrolling and scroll.screenline_mode then
+    local screenline_steps = get_screenline_steps(scroll.opts.winid, lines)
+    if screenline_steps == 0 then
+      return
+    end
+    lines = lines > 0 and screenline_steps or -screenline_steps
+  end
+
   scroll.lines = lines
   if lines == 0 then
     return
@@ -185,6 +243,17 @@ function neoscroll.new_scroll(lines, opts)
   if not window_scrolls and not cursor_scrolls then
     return
   end
+
+  scroll.screenline_mode = false
+  if scroll.opts.move_cursor and window_scrolls and cursor_scrolls and wrapped_smoothscroll_enabled(scroll.opts.winid) then
+    local screenline_steps = get_screenline_steps(scroll.opts.winid, lines)
+    if screenline_steps > 0 then
+      lines = lines > 0 and screenline_steps or -screenline_steps
+      scroll.lines = lines
+      scroll.screenline_mode = true
+    end
+  end
+
   -- Preparation before scrolling starts
   scroll:set_up()
 
