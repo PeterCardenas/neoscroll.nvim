@@ -84,7 +84,7 @@ describe("Wrapped lines", function()
     assert.equals(window_start, vim.fn.line("w0"))
   end)
 
-  it("scrolls wrapped lines with smoothscroll by logical lines", function()
+  it("scrolls wrapped lines with smoothscroll by deterministic screenlines", function()
     neoscroll.setup({
       stop_eof = false,
       respect_scrolloff = false,
@@ -94,11 +94,20 @@ describe("Wrapped lines", function()
     vim.cmd("setlocal smoothscroll")
 
     local cursor_start = vim.fn.line(".")
-    local window_start = vim.fn.line("w0")
+    local col_start = vim.fn.col(".")
+    local scroll = require("neoscroll.scroll")
+    local orig_scroll_one_line = scroll.scroll_one_line
+    local calls = 0
+    scroll.scroll_one_line = function(self, ...)
+      calls = calls + 1
+      return orig_scroll_one_line(self, ...)
+    end
 
     neoscroll.scroll(1, { duration = time, move_cursor = true })
     vim.wait(time + time_tol)
-    assert.equals(cursor_start + 1, vim.fn.line("."))
-    assert.equals(window_start + 1, vim.fn.line("w0"))
+    scroll.scroll_one_line = orig_scroll_one_line
+    assert.equals(cursor_start, vim.fn.line("."))
+    assert.is_true(vim.fn.col(".") > col_start)
+    assert.equals(1, calls)
   end)
 end)

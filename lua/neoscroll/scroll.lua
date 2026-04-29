@@ -153,22 +153,26 @@ end
 function scroll:compute_time_step(lines_to_scroll)
   local easing = self.opts.easing or config.easing_function or config.easing
   local ef = easing_function[easing]
+  local duration = self.opts.duration or 0
   -- lines_to_scroll should always be positive
   -- If there's less than one line to scroll time_step doesn't matter
   if lines_to_scroll < 1 then
     return 1000
   end
   local lines_range = math.abs(self.lines)
+  if lines_range <= 1 then
+    return math.max(1, math.floor(duration + 0.5))
+  end
   local time_step
   -- If not yet in range return average time-step
   if not ef then
-    time_step = math.floor(self.opts.duration / (lines_range - 1) + 0.5)
+    time_step = math.floor(duration / (lines_range - 1) + 0.5)
   elseif lines_to_scroll >= lines_range then
-    time_step = math.floor(self.opts.duration * ef(1 / lines_range) + 0.5)
+    time_step = math.floor(duration * ef(1 / lines_range) + 0.5)
   else
     local x1 = (lines_range - lines_to_scroll) / lines_range
     local x2 = (lines_range - lines_to_scroll + 1) / lines_range
-    time_step = math.floor(self.opts.duration * (ef(x2) - ef(x1)) + 0.5)
+    time_step = math.floor(duration * (ef(x2) - ef(x1)) + 0.5)
   end
   if time_step == 0 then
     time_step = 1

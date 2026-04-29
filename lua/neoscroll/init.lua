@@ -57,47 +57,8 @@ local function wrapped_smoothscroll_enabled(winid)
   end)
 end
 
-local function get_screenline_steps(winid, lines)
-  local ctrl_e = vim.api.nvim_replace_termcodes("<C-e>", false, false, true)
-  local ctrl_y = vim.api.nvim_replace_termcodes("<C-y>", false, false, true)
-  local direction = lines > 0 and 1 or -1
-  local cursor_scroll_cmd = direction > 0 and "gj" or "gk"
-  local scroll_cmd = direction > 0 and ctrl_e .. cursor_scroll_cmd or ctrl_y .. cursor_scroll_cmd
-  local target_lines = math.abs(lines)
-
-  return vim.api.nvim_win_call(winid, function()
-    local initial_view = vim.fn.winsaveview()
-    local initial_topline = vim.fn.line("w0")
-    local initial_cursor_line = vim.fn.line(".")
-    local steps = 0
-
-    while
-      (vim.fn.line("w0") - initial_topline) * direction < target_lines
-      or (vim.fn.line(".") - initial_cursor_line) * direction < target_lines
-    do
-      local before_view = vim.fn.winsaveview()
-      local before_topline = vim.fn.line("w0")
-      local before_cursor_line = vim.fn.line(".")
-      local before_col = vim.fn.col(".")
-      vim.cmd.normal({ bang = true, args = { scroll_cmd } })
-      local after_view = vim.fn.winsaveview()
-      local after_topline = vim.fn.line("w0")
-      local after_cursor_line = vim.fn.line(".")
-      local after_col = vim.fn.col(".")
-      if
-        after_topline == before_topline
-        and after_view.skipcol == before_view.skipcol
-        and after_cursor_line == before_cursor_line
-        and after_col == before_col
-      then
-        break
-      end
-      steps = steps + 1
-    end
-
-    vim.fn.winrestview(initial_view)
-    return steps
-  end)
+local function deterministic_screenline_steps(lines)
+  return math.abs(lines)
 end
 
 local function make_scroll_callback()
@@ -193,8 +154,8 @@ function neoscroll.new_scroll(lines, opts)
   end
 
   if scroll.scrolling and scroll.screenline_mode then
-    local screenline_steps = get_screenline_steps(scroll.opts.winid, lines)
-    if screenline_steps == 0 then
+    local screenline_steps = deterministic_screenline_steps(lines)
+    if screenline_steps <= 0 then
       return
     end
     lines = lines > 0 and screenline_steps or -screenline_steps
@@ -245,13 +206,11 @@ function neoscroll.new_scroll(lines, opts)
   end
 
   scroll.screenline_mode = false
-  if scroll.opts.move_cursor and window_scrolls and cursor_scrolls and wrapped_smoothscroll_enabled(scroll.opts.winid) then
-    local screenline_steps = get_screenline_steps(scroll.opts.winid, lines)
-    if screenline_steps > 0 then
-      lines = lines > 0 and screenline_steps or -screenline_steps
-      scroll.lines = lines
-      scroll.screenline_mode = true
-    end
+  if scroll.opts.move_cursor and (window_scrolls or cursor_scrolls) and wrapped_smoothscroll_enabled(scroll.opts.winid) then
+    local screenline_steps = deterministic_screenline_steps(lines)
+    lines = lines > 0 and screenline_steps or -screenline_steps
+    scroll.lines = lines
+    scroll.screenline_mode = true
   end
 
   -- Preparation before scrolling starts
@@ -267,12 +226,13 @@ function neoscroll.new_scroll(lines, opts)
   local time_step = scroll:compute_time_step(lines_to_scroll_abs)
   local next_time_step = scroll:compute_time_step(lines_to_scroll_abs - 1)
   local next_next_time_step = scroll:compute_time_step(lines_to_scroll_abs - 2)
+  local repeat_time_step = lines_to_scroll_abs > 2 and next_next_time_step or next_time_step
 
   -- Callback function triggered by timer
   local scroll_callback = make_scroll_callback()
   -- Start timer to scroll the rest of the lines
   scroll.timer:start(time_step, next_time_step, vim.schedule_wrap(scroll_callback))
-  scroll.timer:set_repeat(next_next_time_step)
+  scroll.timer:set_repeat(repeat_time_step)
 end
 
 ---ctrl-u emulation
