@@ -27,24 +27,198 @@ local function create_scroll_func(scroll_args, winid)
   end
 end
 
----Check if a buffer line is hidden by conceal_lines extmarks
+local conceal_lookup_limit = 512
+local conceal_fallback_probe_interval = 16
+
+---@param mark table
+---@return integer | nil, integer | nil
+local function conceal_span_from_mark(mark)
+  local details = mark[4]
+  if not details or details.conceal_lines == nil then
+    return nil, nil
+  end
+
+  local start_line = mark[2] + 1
+  local end_line = details.end_row ~= nil and details.end_row or start_line
+  if end_line < start_line then
+    end_line = start_line
+  end
+  return start_line, end_line
+end
+
 ---@param bufnr integer
 ---@param lnum integer 1-based line number
----@return boolean
-local function is_line_concealed(bufnr, lnum)
+---@return integer | nil, integer | nil
+local function conceal_span_on_line(bufnr, lnum)
   local marks = vim.api.nvim_buf_get_extmarks(
     bufnr,
     -1,
     { lnum - 1, 0 },
-    { lnum - 1, 0 },
+    { lnum - 1, -1 },
     { details = true }
   )
   for _, mark in ipairs(marks) do
-    if mark[4] and mark[4].conceal_lines ~= nil then
-      return true
+    local start_line, end_line = conceal_span_from_mark(mark)
+    if start_line and lnum >= start_line and lnum <= end_line then
+      return start_line, end_line
     end
   end
-  return false
+  return nil, nil
+end
+
+---@param bufnr integer
+---@param lnum integer 1-based line number
+---@return integer | nil, integer | nil
+local function conceal_span_covering_line(bufnr, lnum)
+  local prior_marks = vim.api.nvim_buf_get_extmarks(
+    bufnr,
+    -1,
+    { lnum - 1, -1 },
+    { 0, 0 },
+    { details = true, limit = conceal_lookup_limit }
+  )
+  for _, mark in ipairs(prior_marks) do
+    local start_line, end_line = conceal_span_from_mark(mark)
+    if start_line and lnum >= start_line and lnum <= end_line then
+      return start_line, end_line
+    end
+  end
+
+  return nil, nil
+end
+
+---@param bufnr integer
+---@param lnum integer 1-based line number
+---@param conceal_state table | nil
+---@return integer | nil, integer | nil
+local function conceal_span_at_line(bufnr, lnum, conceal_state)
+  if conceal_state then
+    local known_start = conceal_state.range_start
+    local known_end = conceal_state.range_end
+    if known_start and known_end then
+      if lnum >= known_start and lnum <= known_end then
+        return known_start, known_end
+      end
+      if lnum > known_end or lnum < known_start then
+        conceal_state.range_start = nil
+        conceal_state.range_end = nil
+      end
+    end
+  end
+
+  local start_line, end_line = conceal_span_on_line(bufnr, lnum)
+  if start_line then
+    if conceal_state then
+      conceal_state.range_start = start_line
+      conceal_state.range_end = end_line
+      conceal_state.miss_count = 0
+    end
+    return start_line, end_line
+  end
+
+  if conceal_state then
+    conceal_state.miss_count = (conceal_state.miss_count or 0) + 1
+    local should_probe = conceal_state.miss_count == 1
+      or conceal_state.miss_count % conceal_fallback_probe_interval == 0
+    if not should_probe then
+      return nil, nil
+    end
+  end
+
+  start_line, end_line = conceal_span_covering_line(bufnr, lnum)
+  if start_line and conceal_state then
+    conceal_state.range_start = start_line
+    conceal_state.range_end = end_line
+    conceal_state.miss_count = 0
+  end
+  return start_line, end_line
+end
+
+---@param bufnr integer
+---@param lnum integer 1-based line number
+---@param conceal_state table | nil
+---@return boolean
+local function is_line_concealed(bufnr, lnum, conceal_state)
+  local start_line, _ = conceal_span_at_line(bufnr, lnum, conceal_state)
+  return start_line ~= nil
+end
+
+---@param bufnr integer
+---@param start_line integer
+---@param direction integer
+---@param max_line integer
+---@param conceal_state table | nil
+---@return integer | nil
+local function find_next_unconcealed_line(bufnr, start_line, direction, max_line, conceal_state)
+  if not is_line_concealed(bufnr, start_line, conceal_state) then
+    return start_line
+  end
+
+  local function concealed(lnum)
+    return is_line_concealed(bufnr, lnum, conceal_state)
+  end
+
+  if direction > 0 then
+    local concealed_line = start_line
+    local probe = start_line
+    local step = 1
+    while probe < max_line do
+      local next_probe = math.min(max_line, probe + step)
+      if not concealed(next_probe) then
+        probe = next_probe
+        break
+      end
+      concealed_line = next_probe
+      probe = next_probe
+      step = step * 2
+    end
+
+    if concealed(probe) then
+      return nil
+    end
+
+    local left = concealed_line
+    local right = probe
+    while right - left > 1 do
+      local mid = math.floor((left + right) / 2)
+      if concealed(mid) then
+        left = mid
+      else
+        right = mid
+      end
+    end
+    return right
+  end
+
+  local concealed_line = start_line
+  local probe = start_line
+  local step = 1
+  while probe > 1 do
+    local next_probe = math.max(1, probe - step)
+    if not concealed(next_probe) then
+      probe = next_probe
+      break
+    end
+    concealed_line = next_probe
+    probe = next_probe
+    step = step * 2
+  end
+
+  if concealed(probe) then
+    return nil
+  end
+
+  local left = probe
+  local right = concealed_line
+  while right - left > 1 do
+    local mid = math.floor((left + right) / 2)
+    if concealed(mid) then
+      right = mid
+    else
+      left = mid
+    end
+  end
+  return left
 end
 
 local scroll = {
@@ -111,6 +285,7 @@ function scroll:set_up()
   end
   -- Assign number of lines to scroll
   self.target_line = self.lines
+  self.conceal_state = { range_start = nil, range_end = nil, miss_count = 0 }
 end
 
 ---scrolling destructor
@@ -142,6 +317,7 @@ function scroll:tear_down()
 
   self.relative_line = 0
   self.target_line = 0
+  self.conceal_state = nil
   self.scrolling = false
   self.continuous_scroll = false
   self.screenline_mode = false
@@ -244,9 +420,8 @@ function scroll:scroll_one_line(lines_to_scroll, scroll_window, scroll_cursor)
       return false
     end
     local cursor_line_after_window_scroll = vim.api.nvim_win_get_cursor(self.opts.winid)[1]
-    local should_scroll_cursor = scroll_cursor and (
-      not scroll_window or cursor_line_after_window_scroll == initial_cursor_line
-    )
+    local should_scroll_cursor = scroll_cursor
+      and (not scroll_window or cursor_line_after_window_scroll == initial_cursor_line)
     if should_scroll_cursor and not run_scroll_cmd(cursor_scroll_cmd) then
       return false
     end
@@ -265,17 +440,32 @@ function scroll:scroll_one_line(lines_to_scroll, scroll_window, scroll_cursor)
   -- The cursor can land on these via gj/gk or scrolloff enforcement.
   local bufnr = vim.api.nvim_win_get_buf(self.opts.winid)
   local function skip_concealed_cursor_lines()
-    local cur = vim.api.nvim_win_get_cursor(self.opts.winid)[1]
-    while is_line_concealed(bufnr, cur) do
-      local skip_func = create_scroll_func(cursor_scroll_cmd, self.opts.winid)
-      if not pcall(skip_func) then
-        break
-      end
-      local new_cur = vim.api.nvim_win_get_cursor(self.opts.winid)[1]
-      if new_cur == cur then
-        break
-      end
-      cur = new_cur
+    local cursor = vim.api.nvim_win_get_cursor(self.opts.winid)
+    local cur_line = cursor[1]
+    if not is_line_concealed(bufnr, cur_line, self.conceal_state) then
+      return
+    end
+
+    local max_line = vim.api.nvim_buf_line_count(bufnr)
+    local target_line =
+      find_next_unconcealed_line(bufnr, cur_line, direction, max_line, self.conceal_state)
+    if not target_line or target_line == cur_line then
+      return
+    end
+    while
+      target_line >= 1
+      and target_line <= max_line
+      and is_line_concealed(bufnr, target_line, self.conceal_state)
+    do
+      target_line = target_line + direction
+    end
+    if target_line < 1 or target_line > max_line then
+      return
+    end
+
+    local ok = pcall(vim.api.nvim_win_set_cursor, self.opts.winid, { target_line, cursor[2] })
+    if not ok then
+      pcall(vim.api.nvim_win_set_cursor, self.opts.winid, { target_line, 0 })
     end
   end
 
